@@ -228,3 +228,59 @@ func TestDumpCmdCharset(t *testing.T) {
 		t.Errorf("no inspected charset → no flag: %s", without)
 	}
 }
+
+// TestFooterCompleteRealDumpTails pins the exact trailing bytes each dumper
+// writes. pg_dump's completion comment is not its last line — it is followed
+// by a bare "--" and, since the 2025 security releases, a \unrestrict
+// meta-command. Reading only the final line rejected every PostgreSQL dump
+// as truncated, which the container rig caught.
+func TestFooterCompleteRealDumpTails(t *testing.T) {
+	tests := []struct {
+		name string
+		tail string
+		want bool
+	}{
+		{
+			name: "mysqldump",
+			tail: "INSERT INTO t VALUES (1);\n\n-- Dump completed on 2026-09-02 12:00:00\n",
+			want: true,
+		},
+		{
+			name: "pg_dump with trailing comment line",
+			tail: "--\n-- PostgreSQL database dump complete\n--\n\n",
+			want: true,
+		},
+		{
+			name: "pg_dump with \\unrestrict token",
+			tail: "--\n-- PostgreSQL database dump complete\n--\n\n\\unrestrict Ic8jxylLLTCJbzvj0LC0hIUs7IHcQ2WhsfPw046HtDTinle5uHsJzKvH7aC7C45\n\n",
+			want: true,
+		},
+		{
+			name: "truncated mid-COPY",
+			tail: "COPY public.bulk_rows (id, payload) FROM stdin;\n1\trow 1\n2\trow 2\n",
+			want: false,
+		},
+		{
+			name: "truncated after a COPY terminator",
+			tail: "1\trow 1\n2\trow 2\n\\.\n",
+			want: false,
+		},
+		{
+			name: "a row merely quoting the footer does not count",
+			tail: "INSERT INTO t VALUES (1,'-- PostgreSQL database dump complete');\n",
+			want: false,
+		},
+		{
+			name: "empty",
+			tail: "",
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := footerComplete([]byte(tt.tail)); got != tt.want {
+				t.Errorf("footerComplete(%q) = %v, want %v", tt.tail, got, tt.want)
+			}
+		})
+	}
+}

@@ -141,19 +141,32 @@ func analyzeDump(r io.Reader, stats *DumpStats) {
 	stats.FooterOK = footerComplete(tail)
 }
 
-// footerComplete reports whether the dump's last non-blank line is a
-// completion footer — mysqldump's "-- Dump completed on …" or pg_dump's
-// "-- PostgreSQL database dump complete". Anchoring to the final line
-// (rather than a substring search anywhere in the tail) stops a truncated
-// dump whose last bytes merely quote a footer inside a row from passing as
-// complete: real dumps always end with the footer, after all data.
+// footerComplete reports whether the dump ends with a completion footer —
+// mysqldump's "-- Dump completed on …" or pg_dump's "-- PostgreSQL database
+// dump complete". Anchoring to the end (rather than a substring search
+// anywhere in the tail) stops a truncated dump whose last bytes merely quote
+// a footer inside a row from passing as complete: real dumps always end with
+// the footer, after all data.
+//
+// mysqldump's footer really is the final line, but pg_dump's is not: it
+// closes the footer with a bare "--" comment line, and since the 2025
+// security releases it also appends a "\unrestrict <token>" meta-command.
+// Both are structure rather than data, so they are skipped before the footer
+// line is read — without that, every PostgreSQL dump reads as truncated.
+// Skipping only exact "--" lines and psql backslash commands preserves the
+// anti-spoofing property: a COPY data row cannot be the last thing in a dump
+// and still look like a footer.
 func footerComplete(tail []byte) bool {
-	trimmed := strings.TrimRight(string(tail), "\r\n \t")
-	if i := strings.LastIndexByte(trimmed, '\n'); i >= 0 {
-		trimmed = trimmed[i+1:]
+	lines := strings.Split(strings.ReplaceAll(string(tail), "\r\n", "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimRight(lines[i], " \t")
+		if line == "" || line == "--" || strings.HasPrefix(line, `\`) {
+			continue
+		}
+		return strings.HasPrefix(line, "-- Dump completed") ||
+			strings.HasPrefix(line, "-- PostgreSQL database dump complete")
 	}
-	return strings.HasPrefix(trimmed, "-- Dump completed") ||
-		strings.HasPrefix(trimmed, "-- PostgreSQL database dump complete")
+	return false
 }
 
 type countingWriter struct{ n int64 }
